@@ -20,6 +20,9 @@
 #include <memory>
 #include <poll.h>
 
+// Original Paper:
+// http://csl.skku.edu/papers/jpdc11.pdf
+
 // TODO: 
 // - Add Tombstone Purging
 // - Add delay before we send so it's easier to test concurrent operations.
@@ -343,7 +346,7 @@ class RGAList {
 // 2. Operation Info (1 Byte)
 //    - Insert : index-cobject (which will be the left-cobject)
 //    - Delete : index-cobject (cobject to remove)
-//    - Update : index-cobject (cobject to remove)
+//    - Update : index-cobject (cobject to update)
 // 3. character: (if Operation is insert)
 // 3. vector-clock of operation (NumSites * 4bytes) (8 bytes in our case)
 
@@ -565,8 +568,21 @@ static InputType GetInput(const void* buffer, unsigned int length, char& outChar
   return InputType::Unknown;
 }
 
+static int sockFD = -1;
+static int connectionSocketFD = -1;
+
+// TODO: Write out RGA-String when we exit.
+void signal_handler(int i) {
+  close(sockFD);
+  close(connectionSocketFD);
+  term.ResetCursor();
+  term.ClearScreen();
+  term.SetDefaultMode();
+}
+
 int MainLoop(const int socketFD) {
   logout << "Entering Main Loop" << std::endl;
+  signal(SIGINT, signal_handler);
   int SiteId = isClient ? 1 : 0;
   
   VectorClock siteClock(SiteId);
@@ -580,7 +596,10 @@ int MainLoop(const int socketFD) {
 
   // remote event
   events[1].fd = socketFD;
-  events[1].events = POLLIN | POLLHUP;
+  events[1].events = POLLIN | POLLHUP; // POLLRDHUP seems to work
+                                       // better but is Linux-specific.
+                                       // They do slightly different 
+                                       // things.
 
   // String RGA
   RGAList replicaString(siteClock);
@@ -714,6 +733,7 @@ class FileBuf : public std::basic_streambuf<char> {
   }
   
  // TODO: Check for failure. so it conforms to spec.
+ // See: https://en.cppreference.com/w/cpp/io/basic_streambuf/overflow
   virtual int_type overflow(int_type character) override {
     bool eof = CharTraits::eq_int_type(
                         character, 
@@ -730,7 +750,8 @@ class FileBuf : public std::basic_streambuf<char> {
 };
 
 static bool EnableLogging() {
-  // Do not block, will drop writes.
+  // Do not block. Will drop writes to pty if buffer is
+  // full.
   int ptmxFD = open("/dev/ptmx", O_RDWR | O_NONBLOCK, 0);
   CHECK_ERR(ptmxFD, "Failed to open ptmx");
   ptsName = ptsname(ptmxFD);
@@ -740,18 +761,6 @@ static bool EnableLogging() {
   fileBuffer.reset(new FileBuf(ptmxFD));
   logoutPtr = std::make_unique<std::ostream>(fileBuffer.get());
   return true;
-}
-
-static int sockFD = -1;
-static int connectionSocketFD = -1;
-
-// TODO: Write out RGA-String when we exit.
-void signal_handler(int i) {
-  close(sockFD);
-  close(connectionSocketFD);
-  term.ResetCursor();
-  term.ClearScreen();
-  term.SetDefaultMode();
 }
 
 int main(int argc, char** argv) {
@@ -773,8 +782,6 @@ int main(int argc, char** argv) {
     int res = connect(clientSockFD, (sockaddr*)&destSocketAddress, sizeof(destSocketAddress));
     CHECK_ERR(res, "Failed to connect to server");
     sockFD = clientSockFD;
-    signal(SIGTERM, signal_handler);
-    signal(SIGINT, signal_handler);
     MainLoop(clientSockFD);
     close(clientSockFD);
     return 0;
@@ -797,8 +804,6 @@ int main(int argc, char** argv) {
   socklen_t length = sizeof(sockaddr_in);
   int connectionSocketFD = accept(sockFD, reinterpret_cast<sockaddr*>(&clientAddressInfo), &length);
   CHECK_ERR(connectionSocketFD, "Failed to accept incoming connection request");
-  signal(SIGTERM, signal_handler);
-  signal(SIGINT, signal_handler);
   MainLoop(connectionSocketFD);
   close(connectionSocketFD);
   close(sockFD);
